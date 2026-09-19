@@ -1,0 +1,65 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <!-- SimHub itself runs on .NET Framework 4.8. Keep this matching your SimHub install.
+         If your SimHub version has moved to net8.0-windows, change this to net8.0-windows
+         and add <UseWPF>true</UseWPF> (already below) plus re-point the HintPaths below. -->
+    <TargetFramework>net48</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <AssemblyTitle>SimHub Philips Hue Plugin</AssemblyTitle>
+    <Product>SimHub Hue Plugin</Product>
+    <RootNamespace>SimHub.Plugin.HueControl</RootNamespace>
+    <AssemblyName>SimHub.Plugin.HueControl</AssemblyName>
+    <LangVersion>latest</LangVersion>
+    <Platforms>x86;x64;AnyCPU</Platforms>
+    <!-- SimHub is a 32-bit process on most installs. If yours is 64-bit, switch this. -->
+    <PlatformTarget>x86</PlatformTarget>
+    <GenerateAssemblyInfo>false</GenerateAssemblyInfo>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Newtonsoft.Json" Version="13.0.3" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Reference Include="System.Net.Http" />
+  </ItemGroup>
+
+  <!--
+    IMPORTANT: These DLLs are NOT distributed with this project. They ship inside your
+    SimHub installation folder (default: C:\Program Files (x86)\SimHub).
+    Update the <HintPath> values below to point at YOUR SimHub install directory before building.
+  -->
+  <ItemGroup>
+    <Reference Include="SimHub.Plugins">
+      <HintPath>C:\Program Files (x86)\SimHub\SimHub.Plugins.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="GameReaderCommon">
+      <HintPath>C:\Program Files (x86)\SimHub\GameReaderCommon.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="SimHub.Logging">
+      <HintPath>C:\Program Files (x86)\SimHub\SimHub.Logging.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="log4net">
+      <HintPath>C:\Program Files (x86)\SimHub\log4net.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+  </ItemGroup>
+
+  <!--
+    Drop the built DLL straight into SimHub's install folder after every build, so a fresh
+    build is picked up next time SimHub starts (or immediately with F5 debugging, see below).
+    To DISABLE this: delete this whole <Target> block, or comment it out.
+    To CHANGE the destination: edit the DestinationFolder path.
+  -->
+  <Target Name="CopyToSimHub" AfterTargets="Build">
+    <Copy SourceFiles="$(TargetPath)"
+          DestinationFolder="C:\Program Files (x86)\SimHub\"
+          SkipUnchangedFiles="true"
+          ContinueOnError="true" />
+  </Target>
+
+</Project>
