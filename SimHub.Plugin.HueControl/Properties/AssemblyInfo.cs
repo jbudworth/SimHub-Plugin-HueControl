@@ -8,8 +8,8 @@ using System.Windows;
 [assembly: AssemblyProduct("SimHub.Plugin.HueControl")]
 [assembly: AssemblyCopyright("Copyright (c) 2026 jbudworth")]
 [assembly: ComVisible(false)]
-[assembly: AssemblyVersion("0.9.0.0")]
-[assembly: AssemblyFileVersion("0.9.0.0")]
+[assembly: AssemblyVersion("0.9.1.0")]
+[assembly: AssemblyFileVersion("0.9.1.0")]
 
 [assembly: ThemeInfo(
     ResourceDictionaryLocation.None,
