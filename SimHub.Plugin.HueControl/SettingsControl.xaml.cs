@@ -48,7 +48,7 @@ namespace SimHub.Plugin.HueControl
 
             LightRows.Clear();
             foreach (var l in settings.Lights ?? new System.Collections.Generic.List<HueLightConfig>())
-                LightRows.Add(new LightRow { Id = l.Id, Name = l.Name, Enabled = l.Enabled, BridgeName = l.Name });
+                LightRows.Add(new LightRow { Id = l.Id, Name = l.Name, Enabled = l.Enabled, BridgeName = l.BridgeName });
 
             PresetRows.Clear();
             foreach (var p in settings.ColorPresets ?? new System.Collections.Generic.List<HueColorPreset>())
@@ -146,8 +146,9 @@ namespace SimHub.Plugin.HueControl
         }
 
         /// <summary>Copies the Lights and Color Presets grids back into _plugin.Settings.
-        /// Shared by Save and Export, so an export always reflects unsaved on-screen edits too.</summary>
-        private void SyncGridsToPlugin()
+        /// Shared by Save and Export, so an export always reflects unsaved on-screen edits too.
+        /// Returns the names of presets that were skipped because their hex colour is invalid.</summary>
+        private System.Collections.Generic.List<string> SyncGridsToPlugin()
         {
             _plugin.Settings.Lights.Clear();
             foreach (var row in LightRows)
@@ -156,31 +157,51 @@ namespace SimHub.Plugin.HueControl
                 {
                     Id = row.Id,
                     Name = HuePlugin.SanitizeName(row.Name),
+                    BridgeName = row.BridgeName,
                     Enabled = row.Enabled
                 });
             }
 
+            var invalidPresets = new System.Collections.Generic.List<string>();
             _plugin.Settings.ColorPresets.Clear();
             foreach (var p in PresetRows)
             {
-                if (!string.IsNullOrWhiteSpace(p.Name) && !string.IsNullOrWhiteSpace(p.Hex))
+                if (string.IsNullOrWhiteSpace(p.Name) && string.IsNullOrWhiteSpace(p.Hex))
+                    continue;
+
+                if (HueBridgeClient.TryNormalizeHex(p.Hex, out var normalized))
+                {
+                    p.Hex = normalized;
                     _plugin.Settings.ColorPresets.Add(p);
+                }
+                else
+                {
+                    invalidPresets.Add(string.IsNullOrWhiteSpace(p.Name) ? "(unnamed)" : p.Name);
+                }
             }
+            PresetsGrid.Items.Refresh();
+            return invalidPresets;
         }
+
+        private static string InvalidPresetsWarning(System.Collections.Generic.List<string> invalidPresets) =>
+            invalidPresets.Count == 0
+                ? ""
+                : $" Skipped preset(s) with invalid hex colour (expected #RRGGBB): {string.Join(", ", invalidPresets)}.";
 
         private void SaveButton_Click(object sender, RoutedEventArgs e)
         {
             ApplyBasicFieldsToPlugin();
-            SyncGridsToPlugin();
+            var invalidPresets = SyncGridsToPlugin();
 
             _plugin.SaveSettings();
-            StatusText.Text = "Saved. Restart SimHub for new/changed light or preset actions to appear in Controls and Events.";
+            StatusText.Text = "Saved. Restart SimHub for new/changed light or preset actions to appear in Controls and Events."
+                + InvalidPresetsWarning(invalidPresets);
         }
 
         private void ExportButton_Click(object sender, RoutedEventArgs e)
         {
             ApplyBasicFieldsToPlugin();
-            SyncGridsToPlugin();
+            var invalidPresets = SyncGridsToPlugin();
 
             var dialog = new SaveFileDialog
             {
@@ -202,7 +223,8 @@ namespace SimHub.Plugin.HueControl
                 };
                 var json = JsonConvert.SerializeObject(export, Formatting.Indented);
                 File.WriteAllText(dialog.FileName, json);
-                StatusText.Text = $"Exported to {dialog.FileName}. The API key is not included (it's a credential); you'll need to re-Pair after importing this on another install.";
+                StatusText.Text = $"Exported to {dialog.FileName}. The API key is not included (it's a credential); you'll need to re-Pair after importing this on another install."
+                    + InvalidPresetsWarning(invalidPresets);
             }
             catch (Exception ex)
             {

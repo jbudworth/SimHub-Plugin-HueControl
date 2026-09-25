@@ -15,6 +15,10 @@ namespace SimHub.Plugin.HueControl
         /// Keep it free of spaces/dots for cleaner action names.</summary>
         public string Name { get; set; }
 
+        /// <summary>The light's own name as reported by the bridge, persisted so the settings
+        /// screen can show which physical light a row maps to without re-querying the bridge.</summary>
+        public string BridgeName { get; set; }
+
         public bool Enabled { get; set; } = true;
     }
 

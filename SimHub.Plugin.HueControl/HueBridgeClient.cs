@@ -76,10 +76,32 @@ namespace SimHub.Plugin.HueControl
 
         // ---------- Reading state ----------
 
+        /// <summary>
+        /// The bridge reports failures (unauthorized user, unreachable light, bad body...)
+        /// as HTTP 200 with a JSON array of {"error": ...} entries, so status-code checks
+        /// alone miss them. Parses the response and throws with the bridge's own
+        /// description when an error entry is present.
+        /// </summary>
+        private static JToken ParseAndThrowIfError(string json)
+        {
+            var token = JToken.Parse(json);
+            if (token is JArray arr)
+            {
+                foreach (var item in arr)
+                {
+                    var err = item["error"];
+                    if (err != null)
+                        throw new InvalidOperationException(err["description"]?.ToString() ?? "The bridge returned an error.");
+                }
+            }
+            return token;
+        }
+
         public async Task<List<HueDiscoveredLight>> GetLightsAsync()
         {
             var resp = await _http.GetStringAsync($"{BaseUrl}/lights");
-            var obj = JObject.Parse(resp);
+            var obj = ParseAndThrowIfError(resp) as JObject
+                ?? throw new InvalidOperationException("Unexpected response from the bridge.");
             var lights = new List<HueDiscoveredLight>();
 
             foreach (var prop in obj.Properties())
@@ -100,7 +122,8 @@ namespace SimHub.Plugin.HueControl
         public async Task<HueDiscoveredLight> GetLightAsync(string lightId)
         {
             var resp = await _http.GetStringAsync($"{BaseUrl}/lights/{lightId}");
-            var obj = JObject.Parse(resp);
+            var obj = ParseAndThrowIfError(resp) as JObject
+                ?? throw new InvalidOperationException("Unexpected response from the bridge.");
             var state = obj["state"];
             return new HueDiscoveredLight
             {
@@ -118,7 +141,9 @@ namespace SimHub.Plugin.HueControl
             var content = new StringContent(body.ToString(), Encoding.UTF8, "application/json");
             var request = new HttpRequestMessage(HttpMethod.Put, $"{BaseUrl}/lights/{lightId}/state") { Content = content };
             var resp = await _http.SendAsync(request);
+            var text = await resp.Content.ReadAsStringAsync();
             resp.EnsureSuccessStatusCode();
+            ParseAndThrowIfError(text);
         }
 
         public Task SetPowerAsync(string lightId, bool on) =>
@@ -156,12 +181,39 @@ namespace SimHub.Plugin.HueControl
 
         // ---------- Helpers ----------
 
+        /// <summary>
+        /// Normalizes a user-entered hex colour to "#RRGGBB". Accepts an optional leading
+        /// '#' and 3-digit shorthand ("#F00"). Returns false for anything else.
+        /// </summary>
+        public static bool TryNormalizeHex(string input, out string normalized)
+        {
+            normalized = null;
+            if (string.IsNullOrWhiteSpace(input)) return false;
+
+            var hex = input.Trim().TrimStart('#');
+            if (hex.Length == 3)
+                hex = new string(new[] { hex[0], hex[0], hex[1], hex[1], hex[2], hex[2] });
+            if (hex.Length != 6) return false;
+
+            foreach (var c in hex)
+            {
+                bool isHexDigit = (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
+                if (!isHexDigit) return false;
+            }
+
+            normalized = "#" + hex.ToUpperInvariant();
+            return true;
+        }
+
         public static (byte R, byte G, byte B) HexToRgb(string hex)
         {
-            hex = hex.TrimStart('#');
-            byte r = Convert.ToByte(hex.Substring(0, 2), 16);
-            byte g = Convert.ToByte(hex.Substring(2, 2), 16);
-            byte b = Convert.ToByte(hex.Substring(4, 2), 16);
+            if (!TryNormalizeHex(hex, out var normalized))
+                throw new FormatException($"'{hex}' is not a valid colour, expected #RRGGBB.");
+
+            normalized = normalized.TrimStart('#');
+            byte r = Convert.ToByte(normalized.Substring(0, 2), 16);
+            byte g = Convert.ToByte(normalized.Substring(2, 2), 16);
+            byte b = Convert.ToByte(normalized.Substring(4, 2), 16);
             return (r, g, b);
         }
 

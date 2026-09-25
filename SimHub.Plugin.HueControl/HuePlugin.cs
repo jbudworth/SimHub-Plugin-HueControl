@@ -1,6 +1,8 @@
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Controls;
 using System.Windows.Media;
@@ -20,10 +22,20 @@ namespace SimHub.Plugin.HueControl
         internal HueBridgeClient Client { get; private set; }
 
         // Cached last-known state per light id, used by Toggle and by exposed properties.
-        private readonly Dictionary<string, bool> _onState = new Dictionary<string, bool>();
-        private readonly Dictionary<string, int> _briState = new Dictionary<string, int>();
+        // Written from thread-pool tasks (polling, actions) and read from SimHub's own
+        // threads, so these must be thread-safe.
+        private readonly ConcurrentDictionary<string, bool> _onState = new ConcurrentDictionary<string, bool>();
+        private readonly ConcurrentDictionary<string, int> _briState = new ConcurrentDictionary<string, int>();
+
+        // Enabled lights with their collision-free registered names, built once in Init and
+        // shared by RegisterActions/RegisterProperties so both use identical names.
+        private readonly List<(string LightId, string Name)> _registeredLights = new List<(string LightId, string Name)>();
 
         private readonly Stopwatch _pollStopwatch = new Stopwatch();
+
+        // 1 while a RefreshStateAsync pass is in flight, so slow bridge responses
+        // can't cause overlapping polls to pile up.
+        private int _polling;
 
         public ImageSource PictureIcon => HueIcon.Image;
         public string LeftMenuTitle => "Hue Control";
@@ -41,6 +53,7 @@ namespace SimHub.Plugin.HueControl
             DedupeSettings();
             Client = new HueBridgeClient(Settings.BridgeIp, Settings.ApiKey);
 
+            BuildRegisteredLightNames();
             RegisterActions();
             RegisterProperties();
 
@@ -74,14 +87,47 @@ namespace SimHub.Plugin.HueControl
         // Action registration (this is what shows up in Controls and Events)
         // ------------------------------------------------------------------
 
-        private void RegisterActions()
+        /// <summary>
+        /// Resolves each enabled light to a unique sanitized name. Two lights whose names
+        /// sanitize to the same string (e.g. "Rig Left" and "RigLeft") would otherwise
+        /// register duplicate action/property names, leaving one light silently unusable.
+        /// </summary>
+        private void BuildRegisteredLightNames()
         {
+            _registeredLights.Clear();
+            var used = new HashSet<string>();
             foreach (var light in Settings.Lights)
             {
                 if (!light.Enabled || string.IsNullOrWhiteSpace(light.Id)) continue;
-                var lightId = light.Id;
-                var name = SanitizeName(light.Name);
+                var name = MakeUnique(SanitizeName(light.Name), used);
+                if (name != SanitizeName(light.Name))
+                    Log($"Light '{light.Name}' (id {light.Id}) clashes with another light's action name, registered as '{name}' instead.");
+                _registeredLights.Add((light.Id, name));
+            }
+        }
 
+        private static string MakeUnique(string name, HashSet<string> used)
+        {
+            var candidate = name;
+            int i = 2;
+            while (!used.Add(candidate))
+                candidate = $"{name}_{i++}";
+            return candidate;
+        }
+
+        private void RegisterActions()
+        {
+            // Preset names can collide after sanitizing too ("Warm White" vs "WarmWhite").
+            var usedPresetNames = new HashSet<string>();
+            var presets = new List<(string Name, string Hex)>();
+            foreach (var preset in Settings.ColorPresets)
+            {
+                var presetName = MakeUnique(SanitizeName(preset.Name), usedPresetNames);
+                presets.Add((presetName, preset.Hex));
+            }
+
+            foreach (var (lightId, name) in _registeredLights)
+            {
                 PluginManager.AddAction($"TurnOn.{name}", GetType(), (a, b) => Fire(() => Client.SetPowerAsync(lightId, true)));
                 PluginManager.AddAction($"TurnOff.{name}", GetType(), (a, b) => Fire(() => Client.SetPowerAsync(lightId, false)));
                 PluginManager.AddAction($"Toggle.{name}", GetType(), (a, b) =>
@@ -102,11 +148,10 @@ namespace SimHub.Plugin.HueControl
                 }
 
                 // One button-style action per configured colour preset, e.g. SetColor.RigLeft.Red
-                foreach (var preset in Settings.ColorPresets)
+                foreach (var (presetName, hex) in presets)
                 {
-                    var hex = preset.Hex;
-                    var presetName = SanitizeName(preset.Name);
-                    PluginManager.AddAction($"SetColor.{name}.{presetName}", GetType(), (a, b) => Fire(() => Client.SetColorHexAsync(lightId, hex)));
+                    var h = hex;
+                    PluginManager.AddAction($"SetColor.{name}.{presetName}", GetType(), (a, b) => Fire(() => Client.SetColorHexAsync(lightId, h)));
                 }
             }
         }
@@ -126,12 +171,8 @@ namespace SimHub.Plugin.HueControl
 
         private void RegisterProperties()
         {
-            foreach (var light in Settings.Lights)
+            foreach (var (lightId, name) in _registeredLights)
             {
-                if (!light.Enabled) continue;
-                var lightId = light.Id;
-                var name = SanitizeName(light.Name);
-
                 PluginManager.AttachDelegate($"{name}.On", GetType(), () => _onState.TryGetValue(lightId, out var s) && s);
                 PluginManager.AttachDelegate($"{name}.BrightnessPercent", GetType(), () => _briState.TryGetValue(lightId, out var b) ? BriToPercent(b) : 0);
             }
@@ -142,19 +183,32 @@ namespace SimHub.Plugin.HueControl
             if (string.IsNullOrWhiteSpace(Settings.BridgeIp) || string.IsNullOrWhiteSpace(Settings.ApiKey))
                 return;
 
-            foreach (var light in Settings.Lights)
+            // Skip this pass if the previous one is still running (e.g. bridge offline and
+            // every light is waiting out the HTTP timeout), rather than piling up overlapping
+            // polls that spam the log and can finish out of order.
+            if (Interlocked.Exchange(ref _polling, 1) == 1)
+                return;
+
+            try
             {
-                if (!light.Enabled || string.IsNullOrWhiteSpace(light.Id)) continue;
-                try
+                foreach (var light in Settings.Lights)
                 {
-                    var state = await Client.GetLightAsync(light.Id);
-                    _onState[light.Id] = state.On;
-                    _briState[light.Id] = state.Brightness;
+                    if (!light.Enabled || string.IsNullOrWhiteSpace(light.Id)) continue;
+                    try
+                    {
+                        var state = await Client.GetLightAsync(light.Id);
+                        _onState[light.Id] = state.On;
+                        _briState[light.Id] = state.Brightness;
+                    }
+                    catch (Exception ex)
+                    {
+                        Log($"Poll failed for light {light.Id}: {ex.Message}");
+                    }
                 }
-                catch (Exception ex)
-                {
-                    Log($"Poll failed for light {light.Id}: {ex.Message}");
-                }
+            }
+            finally
+            {
+                Interlocked.Exchange(ref _polling, 0);
             }
         }
 
@@ -162,7 +216,6 @@ namespace SimHub.Plugin.HueControl
         // Misc helpers
         // ------------------------------------------------------------------
 
-        /// <summary>Fire-and-forget wrapper for the async Hue calls, since SimHub actions are synchronous void.</summary>
         /// <summary>
         /// One-time cleanup for settings files that already picked up duplicate lights/colour
         /// presets from the list-append bug (see the JsonProperty attributes in HueModels.cs).
@@ -202,6 +255,7 @@ namespace SimHub.Plugin.HueControl
             }
         }
 
+        /// <summary>Fire-and-forget wrapper for the async Hue calls, since SimHub actions are synchronous void.</summary>
         internal static void Fire(Func<Task> action)
         {
             _ = Task.Run(async () =>
