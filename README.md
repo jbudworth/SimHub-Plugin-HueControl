@@ -6,6 +6,8 @@ This talks straight to your Hue Bridge over your local network (the CLIP v1 REST
 
 Logging goes through `SimHub.Logging.Current.Info(...)`, backed by `SimHub.Logging.dll` and `log4net.dll` (on current SimHub builds, logging was split out of `SimHub.Plugins.dll` into its own assembly, so both DLLs need to be referenced and their `HintPath`s pointed at your install folder).
 
+![settings](imgs/HueControl_Settings.png "Settings Example")
+
 ## What you get
 
 For every light you enable in the settings screen (named, say, `RigLeft`), these actions appear under Controls and Events:
